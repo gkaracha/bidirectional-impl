@@ -50,6 +50,7 @@ buildInitTcEnv pgm (RnEnv _rn_cls_infos dc_infos tc_infos) = do -- GEORGE: Assum
     buildStoreClsInfos (PgmExp {})   = return ()
     buildStoreClsInfos (PgmInst _ p) = buildStoreClsInfos p
     buildStoreClsInfos (PgmData _ p) = buildStoreClsInfos p
+    buildStoreClsInfos (PgmVal  _ p) = buildStoreClsInfos p
     buildStoreClsInfos (PgmCls  c p) = case c of
       ClsD rn_cs rn_cls (rn_a :| _kind) rn_method method_ty -> do
         -- Generate And Store The TyCon Info
@@ -914,6 +915,22 @@ elabTermSimpl theory tm = do
 
   return (gen_ty, full_fc_tm)
 
+-- * Value Binding Elaboration
+-- ------------------------------------------------------------------------------
+
+-- | Elaborate a top-level value binding
+elabValBind :: FullTheory -> RnValBind -> TcM (FcValBind, TcCtx)
+elabValBind theory (ValBind a m_ty tm) = do
+  (ty,fc_tm) <- case m_ty of
+    Nothing -> elabTermSimpl (ftDropSuper theory) tm
+    Just ty -> do
+      fc_tm <- elabTermWithSig [] theory tm ty
+      return (ty,fc_tm)
+  ctx <- ask
+  fc_ty <- elabPolyTy ty
+  let fc_val_bind = FcValBind (rnTmVarToFcTmVar a) fc_ty fc_tm
+  return (fc_val_bind, extendCtx ctx a ty)
+
 -- * Program Elaboration
 -- ------------------------------------------------------------------------------
 
@@ -946,6 +963,13 @@ elabProgram theory (PgmData data_decl pgm) = do
   fc_data_decl <- elabDataDecl data_decl
   (fc_pgm, ty, final_theory) <- elabProgram theory pgm
   let fc_program = FcPgmDataDecl fc_data_decl fc_pgm
+  return (fc_program, ty, final_theory)
+
+-- Elaborate a top-level value binding
+elabProgram theory (PgmVal val_bind pgm) = do
+  (fc_val_bind, ext_ctx) <- elabValBind theory val_bind
+  (fc_pgm, ty, final_theory) <- setCtxM ext_ctx $ elabProgram theory pgm
+  let fc_program = FcPgmValDecl fc_val_bind fc_pgm
   return (fc_program, ty, final_theory)
 
 -- * Invoke the complete type checker

@@ -305,6 +305,7 @@ data Program a = PgmExp  (Term a)                 -- ^ Expression
                | PgmCls  (ClsDecl  a) (Program a) -- ^ Class declaration
                | PgmInst (InsDecl  a) (Program a) -- ^ Instance declaration
                | PgmData (DataDecl a) (Program a) -- ^ Datatype declaration
+               | PgmVal  (ValBind  a) (Program a) -- ^ Value Binding
 
 -- | Class declaration
 data ClsDecl a = ClsD { csuper :: ClsCs a           -- ^ Superclass constraints
@@ -325,6 +326,13 @@ data DataDecl a = DataD { dtycon    :: HsTyCon a                     -- ^ Type c
                         , dtyvars   :: [HsTyVarWithKind a]           -- ^ Universal type variables
                         , ddatacons :: [(HsDataCon a, [MonoTy a])] } -- ^ Data constructors
 
+-- | Top-level Value Binding
+data ValBind a = ValBind
+  { vname :: HsTmVar a        -- ^ Value name
+  , vtype :: Maybe (PolyTy a) -- ^ Optional value type
+  , vbind :: Term a           -- ^ Bound term
+  }
+
 -- | Parsed/renamed programs
 type PsProgram = Program Sym
 type RnProgram = Program Name
@@ -340,6 +348,10 @@ type RnInsDecl = InsDecl Name
 -- | Parsed/renamed datatype declarations
 type PsDataDecl = DataDecl Sym
 type RnDataDecl = DataDecl Name
+
+-- | Parsed/renamed value bindings
+type PsValBind = ValBind Sym
+type RnValBind = ValBind Name
 
 -- * Additional Syntax For Type Inference And Elaboration
 -- ------------------------------------------------------------------------------
@@ -593,6 +605,7 @@ instance (Symable a, PrettyPrint a) => PrettyPrint (Program a) where
   ppr (PgmCls  cdecl pgm) = ppr cdecl $$ ppr pgm
   ppr (PgmInst idecl pgm) = ppr idecl $$ ppr pgm
   ppr (PgmData ddecl pgm) = ppr ddecl $$ ppr pgm
+  ppr (PgmVal  vdecl pgm) = ppr vdecl $$ ppr pgm
 
   needsParens _ = False
 
@@ -628,6 +641,15 @@ instance (Symable a, PrettyPrint a) => PrettyPrint (DataDecl a) where
         []               -> []
         ((dc, tys):rest) -> hsep (colorDoc yellow (char '=') : ppr dc : map pprPar tys) : map ppr_dc rest
 
+  needsParens _ = False
+
+-- | Pretty print a top-level value binding
+instance (Symable a, PrettyPrint a) => PrettyPrint (ValBind a) where
+  ppr (ValBind a m_ty tm) = ppr a <+> pprTy <+> equals <+> ppr tm
+    where
+      pprTy = case m_ty of
+        Nothing -> empty
+        Just ty -> dcolon <+> ppr ty
   needsParens _ = False
 
 -- | Pretty print equality constraints

@@ -123,6 +123,7 @@ pProgram :: PsM PsProgram
 pProgram  =  PgmCls  <$> pClsDecl  <*> pProgram
          <|> PgmInst <$> pInstDecl <*> pProgram
          <|> PgmData <$> pDataDecl <*> pProgram
+         <|> PgmVal  <$> pValBind  <*> pProgram
          <|> PgmExp  <$> pTerm
 
 -- | Parse a class declaration
@@ -156,6 +157,14 @@ pDataDecl  =  DataD
           <*  reservedOp "="
           <*> sepBy1 (pDataCon <&> many pPrimTy) (reservedOp "|")
 
+-- | Parse a top-level value binding
+pValBind :: PsM PsValBind
+pValBind  =  try $ ValBind
+         <$  reserved "let"
+         <*> pTmVar
+         <*> optional (symbol "::" *> pPolyTy)
+         <*  symbol "="
+         <*> pTerm
 
 -- * Parse all kinds of names
 -- ------------------------------------------------------------------------------
