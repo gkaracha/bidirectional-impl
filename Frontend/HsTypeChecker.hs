@@ -580,7 +580,7 @@ entail as ((d' :| CtrScheme bs cls_cs (ClsCt cls2 ty2)):schemes) ct@(d :| ClsCt 
 
 -- | Returns the (transitive) super class constaints of the type class constraint
 -- | using the super class theory.
-closure :: [RnTyVar] -> ProgramTheory -> AnnClsCt -> TcM (AnnClsCs, FcTmSubst)
+closure :: [RnTyVar] -> ProgramTheory -> AnnClsCt -> TcM (AnnClsCs, DictCtx)
 closure untchs theory cls_ct = go theory cls_ct
   where
     go ((d_top :| CtrScheme alphas [ClsCt cls2 ty2] q):schemes) ct@(d :| ClsCt cls1 ty1)
@@ -590,14 +590,14 @@ closure untchs theory cls_ct = go theory cls_ct
         let sub_q = substInClsCt ty_subst q
         fc_subbed_alphas <-
           mapM elabMonoTy . substInTyVars ty_subst $ labelOf alphas
-        let ev_subst =
-              d' |->
-               FcTmApp
-                 (foldl FcTmTyApp (FcTmVar d_top) fc_subbed_alphas)
-                 (FcTmVar d)
-        (cls_cs, ev_subst') <- go schemes ct
-        (all_cs, ev_subst'') <- closureAll untchs theory (d' :| sub_q : cls_cs)
-        return (d' :| sub_q : cls_cs <> all_cs, ev_subst <> ev_subst' <> ev_subst'')
+        let tm = FcTmApp
+                   (foldl FcTmTyApp (FcTmVar d_top) fc_subbed_alphas)
+                   (FcTmVar d)
+        fc_sub_q <- elabClsCt sub_q
+        let ctx = LetCtx d' fc_sub_q tm HoleCtx
+        (cls_cs, ctx') <- go schemes ct
+        (all_cs, ctx'') <- closureAll untchs theory (d' :| sub_q : cls_cs)
+        return (d' :| sub_q : cls_cs <> all_cs, ctx <> ctx' <> ctx'')
       | otherwise = go schemes ct
     go [] _cls_ct = return (mempty, mempty)
     go _ _ =
@@ -605,7 +605,7 @@ closure untchs theory cls_ct = go theory cls_ct
         text "closure" <+> colon <+>
           text "constraint scheme has too many implications"
 
-closureAll :: [RnTyVar] -> ProgramTheory -> AnnClsCs -> TcM (AnnClsCs, FcTmSubst)
+closureAll :: [RnTyVar] -> ProgramTheory -> AnnClsCs -> TcM (AnnClsCs, DictCtx)
 closureAll as theory cs =
   ((\(a, b) -> (mconcat a, mconcat b)) . unzip) <$> mapM (closure as theory) cs
 
@@ -767,10 +767,10 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
 
   --  Generate fresh dictionary variables for the instance context
   ann_ins_cs <- snd <$> annotateCts ins_cs
-  (closure_cs, closure_ev_subst) <- closureAll
-                                      (labelOf bs)
-                                      (theory_super theory)
-                                       ann_ins_cs
+  (closure_cs, closure_ctx) <- closureAll
+                                 (labelOf bs)
+                                 (theory_super theory)
+                                 ann_ins_cs
   let ann_ins_schemes = (fmap . fmap) (CtrScheme [] []) (closure_cs <> ann_ins_cs)
 
   -- The extended program theory
@@ -813,10 +813,10 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
     binds <- annCtsToTmBinds ann_ins_cs
     dc    <- lookupClsDataCon cls
     pat_ty <- elabMonoTy (hsTyPatToMonoTy typat)
-    return $ substFcTmInTm closure_ev_subst $
-      fcTmTyAbs fc_bs $
-        fcTmAbs binds $
-           fcDataConApp dc pat_ty (fc_super_tms ++ [fc_method_tm])
+    return $ fcTmTyAbs fc_bs $
+      fcTmAbs binds $
+        applyDictCtx closure_ctx $
+          fcDataConApp dc pat_ty (fc_super_tms ++ [fc_method_tm])
 
   -- Resulting dictionary transformer
   let fc_val_bind = FcValBind ins_d dtrans_ty fc_dict_transformer
@@ -846,7 +846,7 @@ elabTermWithSig untch theory tm poly_ty = do
   -- Generate fresh dictionary variables for the given constraints
   given_ccs <- snd <$> annotateCts cs
   dbinds <- annCtsToTmBinds given_ccs
-  (super_cs, closure_ev_subst) <- closureAll untch (theory_super theory) given_ccs
+  (super_cs, closure_ctx) <- closureAll untch (theory_super theory) given_ccs
   let given_schemes = (fmap . fmap) (CtrScheme [] []) (super_cs <> given_ccs)
 
   -- Resolve all the wanted constraints
@@ -870,7 +870,8 @@ elabTermWithSig untch theory tm poly_ty = do
   return $
     fcTmTyAbs fc_as $
     fcTmAbs dbinds $
-      substFcTmInTm (closure_ev_subst <> ev_subst) $
+    applyDictCtx closure_ctx $
+      substFcTmInTm ev_subst $
         substFcTyInTm fc_subst fc_tm
 
 -- | Convert a source type substitution to a System F type substitution

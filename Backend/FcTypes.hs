@@ -293,6 +293,23 @@ matchCtxApply MCtxHole t = t
 matchCtxApply (MCtxCase d p e) t =
   FcTmCase (FcTmVar d) [(FcAlt p (matchCtxApply e t))]
 
+-- * Dictionary Contexts
+-- ----------------------------------------------------------------------------
+
+data DictCtx = HoleCtx                               -- ^ Hole: []
+             | LetCtx FcTmVar FcType FcTerm DictCtx  -- ^ Let binding: let x : ty = tm in tm
+
+-- | Apply a dictionary context to a term
+applyDictCtx :: DictCtx -> FcTerm -> FcTerm
+applyDictCtx HoleCtx               tm2 = tm2
+applyDictCtx (LetCtx x ty tm1 ctx) tm2 = FcTmLet x ty tm1 (applyDictCtx ctx tm2)
+
+-- | Dictionary contexts are monoidal (if we ignore their well-scopedness)
+instance  Monoid DictCtx where
+  mempty = HoleCtx
+  mappend HoleCtx               ctx2 = ctx2
+  mappend (LetCtx x ty tm ctx1) ctx2 = LetCtx x ty tm (mappend ctx1 ctx2)
+
 -- * Some smart constructors (uncurried variants)
 -- ----------------------------------------------------------------------------
 
