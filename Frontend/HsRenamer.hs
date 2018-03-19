@@ -309,7 +309,7 @@ rnDataDecl (DataD tc as dcs) = do
     rntys <- mapM (extendTyVars binds . rnMonoTy) tys
 
     -- Store the DataCon info in the global environment
-    addDataConInfoRnM dc $ HsDCInfo rndc rnas rntc (map monoTyToPolyTy rntys) (FcDC (nameOf rndc))
+    addDataConInfoRnM dc $ HsDCInfo rndc rnas rntc rntys (FcDC (nameOf rndc))
 
     return (rndc, rntys)
 

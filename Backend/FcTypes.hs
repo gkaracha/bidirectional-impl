@@ -28,6 +28,14 @@ mkFcArrowTy ty1 ty2 = FcTyApp (FcTyApp (FcTyCon fcArrowTyCon) ty1) ty2
 fcArrowTyCon :: FcTyCon
 fcArrowTyCon = FcTC (mkName (mkSym "(->)") arrowTyConUnique)
 
+fcArrowTyconInfo :: FcTyConInfo
+fcArrowTyconInfo =
+  FcTCInfo
+    fcArrowTyCon
+    [ mkFcTyVar (mkName (mkSym "a") arrowTyVar1Unique) KStar
+    , mkFcTyVar (mkName (mkSym "b") arrowTyVar2Unique) KStar
+    ]
+
 isFcArrowTy :: FcType -> Maybe (FcType, FcType)
 isFcArrowTy (FcTyApp (FcTyApp (FcTyCon tc) ty1) ty2)
   | tc == fcArrowTyCon  = Just (ty1, ty2)
@@ -147,7 +155,7 @@ instance PrettyPrint FcDataConInfo where
   needsParens _ = False
 
 -- TODO doc
-newtype FcTyFam = FcFV { unFcFV :: Name }
+newtype FcTyFam = FcTF { unFcTF :: Name }
   deriving (Eq, Ord, Symable, Named, Uniquable)
 
 data FcFamInfo = FcFamInfo

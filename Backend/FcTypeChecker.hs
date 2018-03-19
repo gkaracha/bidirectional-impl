@@ -93,10 +93,50 @@ addAxiomInfoM info =
            extendAssocList (fc_ax_var info) info (fc_env_ax_info env)
        })
 
+addDataConInfoM :: FcDataConInfo -> FcM ()
+addDataConInfoM info =
+  modify
+    (\env ->
+       env
+       { fc_env_dc_info =
+           extendAssocList (fc_dc_data_con info) info (fc_env_dc_info env)
+       })
+
+addTyConInfoM :: FcTyConInfo -> FcM ()
+addTyConInfoM info =
+  modify
+    (\env ->
+       env
+       { fc_env_tc_info =
+           extendAssocList (fc_tc_ty_con info) info (fc_env_tc_info env)
+       })
+
 notInFcGblEnvM :: (Eq a, PrettyPrint a, MonadError CompileError m, MonadState s m) => (s -> AssocList a b) -> a -> m ()
 notInFcGblEnvM f x = gets f >>= \l -> case lookupInAssocList x l of
   Just _  -> fcFail (text "notInFcGblEnvM" <+> colon <+> ppr x <+> text "is already bound")
   Nothing -> return ()
+
+-- * Building the global environment
+-- ----------------------------------------------------------------------------
+
+buildInitFcEnv :: FcProgram -> FcM ()
+buildInitFcEnv (FcPgmDataDecl (FcDataDecl tc as dcs) pgm) = do
+  notInFcGblEnvM fc_env_tc_info tc
+  addTyConInfoM (FcTCInfo tc as)
+  forM_ dcs $ \(dc,bs,props,tys) -> do
+    notInFcGblEnvM fc_env_dc_info dc
+    addDataConInfoM (FcDCInfo dc as bs props tc tys)
+  buildInitFcEnv pgm
+buildInitFcEnv (FcPgmFamDecl (FcFamDecl f as k) pgm) = do
+  notInFcGblEnvM fc_env_tf_info f
+  addFamInfoM (FcFamInfo f as k)
+  buildInitFcEnv pgm
+buildInitFcEnv (FcPgmAxiomDecl (FcAxiomDecl g as fam us v) pgm) = do
+  notInFcGblEnvM fc_env_ax_info g
+  addAxiomInfoM (FcAxiomInfo g as fam us v)
+  buildInitFcEnv pgm
+buildInitFcEnv (FcPgmValDecl _decl pgm) = buildInitFcEnv pgm
+buildInitFcEnv (FcPgmTerm _term) = return ()
 
 -- * Type checking
 -- ----------------------------------------------------------------------------
@@ -135,8 +175,7 @@ tcFcValBind (FcValBind x ty tm) = do
   extendCtxM x ty ask -- GEORGE: Return the extended environment
 
 tcFcAxiomDecl :: FcAxiomDecl -> FcM ()
-tcFcAxiomDecl (FcAxiomDecl g as fam us v) = do
-  notInFcGblEnvM fc_env_ax_info g
+tcFcAxiomDecl (FcAxiomDecl _g as fam us v) = do
   mapM_ notInCtxM as
   FcFamInfo _ as' kind <- lookupFamInfoM fam
   unless (length us == length as') $
@@ -149,13 +188,9 @@ tcFcAxiomDecl (FcAxiomDecl g as fam us v) = do
   unless (ks == (kindOf <$> as')) $
     fcFail $
     text "tcFcAxiomDecl" <+> colon <+> text "parameter kind mismatch"
-  addAxiomInfoM (FcAxiomInfo g as fam us v)
 
 tcFcFamDecl :: FcFamDecl -> FcM ()
-tcFcFamDecl (FcFamDecl f as k) = do
-  notInFcGblEnvM fc_env_tf_info f
-  mapM_ notInCtxM as
-  addFamInfoM (FcFamInfo f as k)
+tcFcFamDecl (FcFamDecl _f as _k) = mapM_ notInCtxM as
 
 -- | Type check a program
 tcFcProgram :: FcProgram -> FcM FcType
@@ -194,7 +229,9 @@ tcTerm (FcTmApp tm1 tm2)  = do
       False -> fcFail (text "tcTerm" <+> text "FcTmApp" $$ pprPar ty1 $$ pprPar ty2)
     Nothing           -> fcFail (text "Wrong function FcType application"
                                       $$ parens (text "ty1=" <+> ppr ty1)
-                                      $$ parens (text "ty2=" <+> ppr ty2))
+                                      $$ parens (text "ty2=" <+> ppr ty2)
+                                      $$ parens (text "tm1=" <+> ppr tm1)
+                                      $$ parens (text "tm2=" <+> ppr tm2))
 
 tcTerm (FcTmTyAbs a tm) = do
   notInCtxM a -- GEORGE: Ensure not already bound
@@ -397,32 +434,31 @@ ensureIdenticalTypes types = unless (go types) $ fcFail $ text "Type mismatch in
     go []       = True
     go (ty:tys) = all (eqFcTypes ty) tys
 
--- * Invoke the complete System F type checker
+-- * Invoke the complete System Fc type checker
 -- ----------------------------------------------------------------------------
 
 -- GEORGE: Refine the type and also print more stuff out
 
 fcTypeCheck ::
-     (AssocList FcTyCon FcTyConInfo, AssocList FcDataCon FcDataConInfo)
-  -> UniqueSupply
+     UniqueSupply
   -> FcProgram
   -> Either CompileError ((FcType, UniqueSupply), FcGblEnv)
-fcTypeCheck (tc_env, dc_env) us pgm = runExcept
-                                    $ flip runStateT  fc_init_gbl_env
-                                    $ flip runReaderT fc_init_ctx
-                                    $ flip runUniqueSupplyT us
-                                    $ markFcError
-                                    $ tcFcProgram pgm
+fcTypeCheck us pgm = runExcept
+                   $ flip runStateT  fc_init_gbl_env
+                   $ flip runReaderT fc_init_ctx
+                   $ flip runUniqueSupplyT us
+                   $ markErrorPhase FcTypeChecker
+                   $ do buildInitFcEnv pgm
+                        tcFcProgram pgm
   where
     fc_init_ctx     = mempty
-    fc_init_gbl_env = FcGblEnv { fc_env_tc_info = tc_env
-                               , fc_env_dc_info = dc_env
-                               , fc_env_tf_info = mempty -- TODO
-                               , fc_env_ax_info = mempty
-                               }
+    fc_init_gbl_env =
+      FcGblEnv
+      { fc_env_tc_info = extendAssocList fcArrowTyCon fcArrowTyconInfo mempty
+      , fc_env_dc_info = mempty
+      , fc_env_tf_info = mempty
+      , fc_env_ax_info = mempty
+      }
 
 fcFail :: MonadError CompileError m => Doc -> m a
 fcFail = throwError . CompileError FcTypeChecker
-
-markFcError :: MonadError CompileError m => m a -> m a
-markFcError = markErrorPhase FcTypeChecker

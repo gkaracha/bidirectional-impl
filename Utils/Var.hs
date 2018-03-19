@@ -13,6 +13,7 @@ module Utils.Var
 , mkPsTmVar, mkPsTyVar, mkRnTmVar, mkRnTyVar, rnTyVarToPsTyVar
   -- * Target variables and dictionary variables
 , FcTyVar, FcTmVar, DictVar
+, mkFcTyVar, mkFcTmVar
   -- * Convert a source renamed variable to a target variable of the same kind
 , rnTmVarToFcTmVar, rnTyVarToFcTyVar
   -- * Generating fresh variables
@@ -155,11 +156,11 @@ instance PrettyPrint FcTyVar where
   ppr           = ppr . fctyvar_name
   needsParens _ = False
 
--- mkFcTyVar :: Name -> FcTyVar
--- mkFcTyVar = FV
---
--- mkFcTmVar :: Name -> FcTmVar
--- mkFcTmVar = FV
+mkFcTyVar :: Name -> Kind -> FcTyVar
+mkFcTyVar = FcTyVar
+
+mkFcTmVar :: Name -> FcTmVar
+mkFcTmVar = FcTmVar
 
 instance Uniquable FcTmVar where
   getUnique = getUnique . fctmvar_name

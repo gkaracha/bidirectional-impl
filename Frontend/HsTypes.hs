@@ -57,19 +57,11 @@ type PsDataCon = HsDataCon Sym
 type RnDataCon = HsDataCon Name
 
 data HsDataConInfo
-  -- Normal DataCon
   = HsDCInfo { hs_dc_data_con    :: RnDataCon    -- ^ The data constructor name
              , hs_dc_univ        :: [RnTyVar]    -- ^ Universal type variables
              , hs_dc_parent      :: RnTyCon      -- ^ Parent type constructor
-             , hs_dc_arg_tys     :: [RnPolyTy]   -- ^ Argument types
+             , hs_dc_arg_tys     :: [RnMonoTy]   -- ^ Argument types
              , hs_dc_fc_data_con :: FcDataCon }  -- ^ Elaborated Data Constructor
-  -- DataCon generated for a class
-  | HsDCClsInfo { hs_dc_data_con    :: RnDataCon    -- ^ The data constructor name
-                , hs_dc_univ        :: [RnTyVar]    -- ^ Universal type variables
-                , hs_dc_parent      :: RnTyCon      -- ^ Parent type constructor
-                , hs_dc_super       :: RnClsCs
-                , hs_dc_arg_tys     :: [RnPolyTy]   -- ^ Argument types
-                , hs_dc_fc_data_con :: FcDataCon }  -- ^ Elaborated Data Constructor
 
 -- * Class Names
 -- ------------------------------------------------------------------------------
@@ -95,8 +87,9 @@ data ClassInfo
               , cls_type_args :: [RnTyVar] -- ^ Type arguments
               , cls_method    :: RnTmVar   -- ^ Method name
               , cls_method_ty :: RnPolyTy  -- ^ Method type
-              , cls_tycon     :: RnTyCon   -- ^ Elaborated Type Constructor
-              , cls_datacon   :: RnDataCon -- ^ Elaborated Data Constructor
+              , cls_tycon     :: FcTyCon   -- ^ Elaborated Type Constructor
+              , cls_datacon   :: FcDataCon -- ^ Elaborated Data Constructor
+              , cls_tyfam     :: FcTyFam   -- ^ Elaborated Type Family
               }
 
 data RnClsInfo
@@ -371,16 +364,15 @@ type AnnClsCs = [AnnClsCt]
 type AnnScheme = Ann DictVar CtrScheme
 type AnnSchemes = [AnnScheme]
 
-type EqAxioms = [FcAxiomInfo]
-
 -- | The program theory is just a list of name-annotated constrains
 type ProgramTheory = AnnSchemes
 
-data FullTheory = FT { theory_super :: ProgramTheory
-                     , theory_inst  :: ProgramTheory
-                     , theory_local :: ProgramTheory
-                     , theory_axiom :: EqAxioms
-                     }
+data FullTheory = FT
+  { theory_super :: ProgramTheory
+  , theory_inst  :: ProgramTheory
+  , theory_local :: ProgramTheory
+  , theory_bider :: ProgramTheory
+  }
 
 -- | Extend the superclass component of the theory
 ftExtendSuper :: FullTheory -> ProgramTheory -> FullTheory
@@ -393,6 +385,10 @@ ftExtendInst theory inst_cs = theory { theory_inst = theory_inst theory `mappend
 -- | Extend the local component of the theory
 ftExtendLocal :: FullTheory -> ProgramTheory -> FullTheory
 ftExtendLocal theory local_cs = theory { theory_local = theory_local theory `mappend` local_cs }
+
+-- | Extend the inverted instance component of the theory
+ftExtendBider :: FullTheory -> ProgramTheory -> FullTheory
+ftExtendBider theory local_cs = theory { theory_bider = theory_bider theory `mappend` local_cs }
 
 -- | Collapse the full program theory to a program theory (just concatenate)
 ftToProgramTheory :: FullTheory -> ProgramTheory
@@ -474,14 +470,6 @@ instance PrettyPrint HsDataConInfo where
       , text "parent"  <+> colon <+> ppr tc
       , text "arg_tys" <+> colon <+> ppr arg_tys
       ]
-  ppr (HsDCClsInfo _dc univs tc super arg_tys _dc_fc_data_con)
-    = braces $ hsep $ punctuate comma
-    $ [
-        text "univ"    <+> colon <+> ppr univs
-      , text "parent"  <+> colon <+> ppr tc
-      , text "super"   <+> colon <+> ppr super
-      , text "arg_tys" <+> colon <+> ppr arg_tys
-      ]
   needsParens _ = False
 
 -- | Pretty print class names
@@ -491,7 +479,7 @@ instance Symable a => PrettyPrint (Class a) where
 
 -- | Pretty print type class info
 instance PrettyPrint ClassInfo where
-  ppr (ClassInfo cs cls type_args method method_ty tycon datacon)
+  ppr (ClassInfo cs cls type_args method method_ty tycon datacon fam)
     = braces $ vcat $ punctuate comma
     $ [ text "cls_super"     <+> colon <+> ppr cs
       , text "cls_class"     <+> colon <+> ppr cls
@@ -500,15 +488,17 @@ instance PrettyPrint ClassInfo where
       , text "cls_method_ty" <+> colon <+> ppr method_ty
       , text "cls_tycon"     <+> colon <+> ppr tycon
       , text "cls_datacon"   <+> colon <+> ppr datacon
+      , text "cls_fam"       <+> colon <+> ppr fam
       ]
   needsParens _ = False
 
 instance PrettyPrint FullTheory where
-  ppr (FT super inst local _axiom)
+  ppr (FT super inst local bider)
     = braces $ vcat $ punctuate comma
     $ [ text "theory_super" <+> colon <+> ppr super
       , text "theory_inst"  <+> colon <+> ppr inst
       , text "theory_local" <+> colon <+> ppr local
+      , text "theory_bider" <+> colon <+> ppr bider
       ]
   needsParens _ = False
 

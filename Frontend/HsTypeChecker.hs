@@ -21,6 +21,7 @@ import Utils.Ctx
 import Utils.PrettyPrint hiding ((<>))
 import Utils.Utils
 import Utils.Errors
+import Utils.SnocList
 
 import Control.Monad.Writer
 import Control.Monad.Reader
@@ -54,17 +55,15 @@ buildInitTcEnv pgm (RnEnv _rn_cls_infos dc_infos tc_infos) = do -- GEORGE: Assum
     buildStoreClsInfos (PgmCls  c p) = case c of
       ClsD rn_cs rn_cls (rn_a :| _kind) rn_method method_ty -> do
         -- Generate And Store The TyCon Info
-        rn_tc <- HsTC . mkName (mkSym ("T" ++ (show $ symOf rn_cls))) <$> getUniqueM
-        let tc_info = HsTCInfo rn_tc [rn_a] (FcTC (nameOf rn_tc))
-        addTyConInfoTcM rn_tc tc_info
+        fc_tc <- FcTC . mkName (mkSym ("T" ++ (show $ symOf rn_cls))) <$> getUniqueM
 
         -- Generate And Store The DataCon Info
-        rn_dc  <- HsDC . mkName (mkSym ("K" ++ (show $ symOf rn_cls))) <$> getUniqueM
-        let dc_info = HsDCClsInfo rn_dc [rn_a] rn_tc rn_cs [method_ty] (FcDC (nameOf rn_dc))
-        addDataConInfoTcM rn_dc dc_info
+        fc_dc  <- FcDC . mkName (mkSym ("K" ++ (show $ symOf rn_cls))) <$> getUniqueM
+
+        fc_fam <- FcTF . mkName (mkSym ("F" ++ (show $ symOf rn_cls))) <$> getUniqueM
 
         -- Generate And Store The Class Info
-        let cls_info = ClassInfo rn_cs rn_cls [rn_a] rn_method method_ty rn_tc rn_dc
+        let cls_info = ClassInfo rn_cs rn_cls [rn_a] rn_method method_ty fc_tc fc_dc fc_fam
         addClsInfoTcM rn_cls cls_info
 
         -- Continue with the rest
@@ -92,55 +91,19 @@ type TcM = UniqueSupplyT (ReaderT TcCtx (StateT TcEnv (Except CompileError)))
 
 data TcEnv = TcEnv { tc_env_cls_info :: AssocList RnClass   ClassInfo
                    , tc_env_dc_info  :: AssocList RnDataCon HsDataConInfo
-                   , tc_env_tc_info  :: AssocList RnTyCon   HsTyConInfo }
+                   , tc_env_tc_info  :: AssocList RnTyCon   HsTyConInfo
+                   , tc_env_tuples   :: AssocList Int       (FcTyCon, FcDataCon)
+                   }
 
 instance PrettyPrint TcEnv where
-  ppr (TcEnv cls_infos dc_infos tc_infos)
+  ppr (TcEnv cls_infos dc_infos tc_infos fc_tuples)
     = braces $ vcat $ punctuate comma
     [ text "tc_env_cls_info" <+> colon <+> ppr cls_infos
     , text "tc_env_dc_info"  <+> colon <+> ppr dc_infos
     , text "tc_env_tc_info"  <+> colon <+> ppr tc_infos
+    , text "tc_env_tuples"   <+> colon <+> ppr fc_tuples
     ]
   needsParens _ = False
-
--- | Transform info for a type constructor to the System F variant
-elabHsTyConInfo :: HsTyConInfo -> FcTyConInfo
-elabHsTyConInfo (HsTCInfo _tc as fc_tc) = FcTCInfo fc_tc (map rnTyVarToFcTyVar as)
-
-elabHsDataConInfo :: HsDataConInfo -> TcM FcDataConInfo
-elabHsDataConInfo (HsDCInfo _dc as tc tys fc_dc) = do
-  fc_tc  <- lookupTyCon tc
-  fc_tys <- map snd <$> extendTcCtxTysM as (mapM wfElabPolyTy tys)
-  return $ FcDCInfo fc_dc (map rnTyVarToFcTyVar as) mempty mempty fc_tc fc_tys
-elabHsDataConInfo (HsDCClsInfo _dc as tc super tys fc_dc) = do
-  fc_tc  <- lookupTyCon tc
-  fc_sc  <- extendTcCtxTysM as (mapM elabClsCt super)
-  fc_tys <- map snd <$> extendTcCtxTysM as (mapM wfElabPolyTy tys)
-  return $
-    FcDCInfo
-      fc_dc
-      (map rnTyVarToFcTyVar as)
-      mempty
-      mempty
-      fc_tc
-      (fc_sc ++ fc_tys)
-
-buildInitFcAssocs :: TcM (AssocList FcTyCon FcTyConInfo, AssocList FcDataCon FcDataConInfo)
-buildInitFcAssocs = do
-  -- Convert the tyCon associations
-  tc_infos <- gets tc_env_tc_info
-  fc_tc_infos <- flip mapAssocListM tc_infos $ \(tc, tc_info) -> do
-    fc_tc <- lookupTyCon tc
-    return (fc_tc, elabHsTyConInfo tc_info)
-
-  -- Convert the dataCon associations
-  dc_infos <- gets tc_env_dc_info
-  fc_dc_infos <- flip mapAssocListM dc_infos $ \(dc, dc_info) -> do
-    fc_dc      <- lookupDataCon dc
-    fc_dc_info <- elabHsDataConInfo dc_info
-    return (fc_dc, fc_dc_info)
-
-  return (fc_tc_infos, fc_dc_infos)
 
 -- * Lookup data and type constructors for a class
 -- ------------------------------------------------------------------------------
@@ -174,18 +137,17 @@ clsArgKinds cls = map kindOf . cls_type_args <$> lookupTcEnvM tc_env_cls_info cl
 
 -- | Lookup the System Fc type constructor for a class
 lookupClsTyCon :: RnClass -> TcM FcTyCon
-lookupClsTyCon cls = do
-  hs_tycon <- cls_tycon <$> lookupTcEnvM tc_env_cls_info cls
-  hs_tc_fc_ty_con <$> lookupTcEnvM tc_env_tc_info hs_tycon
+lookupClsTyCon cls = cls_tycon <$> lookupTcEnvM tc_env_cls_info cls
 
 -- | Lookup the System Fc data constructor for a class
 lookupClsDataCon :: RnClass -> TcM FcDataCon
-lookupClsDataCon cls = do
-  hs_datacon <- cls_datacon <$> lookupTcEnvM tc_env_cls_info cls
-  hs_dc_fc_data_con <$> lookupTcEnvM tc_env_dc_info hs_datacon
+lookupClsDataCon cls = cls_datacon <$> lookupTcEnvM tc_env_cls_info cls
+
+lookupclsTyFam :: RnClass -> TcM FcTyFam
+lookupclsTyFam cls = cls_tyfam <$> lookupTcEnvM tc_env_cls_info cls
 
 -- | Get the signature of a data constructor in pieces
-dataConSig :: RnDataCon -> TcM ([RnTyVar], [RnPolyTy], RnTyCon) -- GEORGE: Needs to take into account the class case too
+dataConSig :: RnDataCon -> TcM ([RnTyVar], [RnMonoTy], RnTyCon)
 dataConSig dc = lookupTcEnvM tc_env_dc_info dc >>= \info ->
   return ( hs_dc_univ    info
          , hs_dc_arg_tys info
@@ -202,6 +164,14 @@ lookupClsParam cls = do
   case cls_type_args info of
     [a] -> return a
     _   -> tcFail (text "lookupClsParam")
+
+lookupFcTuple :: Int -> TcM (FcTyCon, FcDataCon)
+lookupFcTuple arity = lookupTcEnvM tc_env_tuples arity `catchError` \_ -> do
+  fc_tc  <- FcTC . mkName (mkSym "Tuple#") <$> getUniqueM
+  fc_dc  <- FcDC . mkName (mkSym "Tuple#") <$> getUniqueM
+  modify $ \s ->
+    s { tc_env_tuples = extendAssocList arity (fc_tc, fc_dc) (tc_env_tuples s) }
+  return (fc_tc, fc_dc)
 
 -- * Type and Constraint Elaboration (With Well-formedness (well-scopedness) Check)
 -- ------------------------------------------------------------------------------
@@ -436,17 +406,9 @@ elabTmCon dc = do
 
 freshenDataConSig :: RnDataCon -> TcM ([RnTyVar], [RnMonoTy], RnTyCon)
 freshenDataConSig dc = do
-  (as, poly_arg_tys, tc) <- dataConSig dc
+  (as, arg_tys, tc) <- dataConSig dc
   (bs, subst) <- freshenRnTyVars as                              -- Freshen up the universal type variables
-  arg_tys     <- polyTysToMonoTysM $ map (substInPolyTy subst) poly_arg_tys -- Substitute in the argument types
-  return (bs, arg_tys, tc)
-
--- | Cast a list of polytypes to monotypes. Fail if not possible
-polyTysToMonoTysM :: MonadError CompileError m => [PolyTy a] -> m [MonoTy a]
-polyTysToMonoTysM []       = return []
-polyTysToMonoTysM (ty:tys) = case polyTyToMonoTy ty of
-  Just mono_ty -> fmap (mono_ty:) (polyTysToMonoTysM tys)
-  Nothing      -> tcFail (text "polyTysToMonoTysM" <+> colon <+> text "non-monotype")
+  return (bs, substInMonoTy subst <$> arg_tys, tc)
 
 -- | Elaborate a case expression
 elabTmCase :: RnTerm -> [RnAlt] -> GenM (RnMonoTy, FcTerm)
@@ -462,16 +424,23 @@ elabHsAlt :: RnMonoTy {- Type of the scrutinee -}
           -> RnAlt    {- Case alternative      -}
           -> GenM FcAlt
 elabHsAlt scr_ty res_ty (HsAlt (HsPat dc xs) rhs) = do
-  (as, orig_arg_tys, tc) <- liftGenM (dataConSig dc) -- Get the constructor's signature
-  fc_dc <- liftGenM (lookupDataCon dc)               -- Get the constructor's System F representation
+  -- Get the constructor's signature
+  (as, orig_arg_tys, tc) <- liftGenM (dataConSig dc)
+  -- Get the constructor's System F representation
+  fc_dc <- liftGenM (lookupDataCon dc)
 
-  (bs, ty_subst) <- liftGenM (freshenRnTyVars as)               -- Generate fresh universal type variables for the universal tvs
-  let arg_tys = map (substInPolyTy ty_subst) orig_arg_tys       -- Apply the renaming substitution to the argument types
-  (rhs_ty, fc_rhs) <- extendCtxM xs arg_tys (elabTerm rhs)   -- Type check the right hand side
-  storeEqCs [ scr_ty :~: foldl TyApp (TyCon tc) (map TyVar bs)  -- The scrutinee type must match the pattern type
-            , res_ty :~: rhs_ty ]                               -- All right hand sides should be the same
+  -- Generate fresh universal type variables for the universal tvs
+  (bs, ty_subst) <- liftGenM (freshenRnTyVars as)
+  -- Apply the renaming substitution to the argument types
+  let arg_tys = substInMonoTy ty_subst <$> orig_arg_tys
+  -- Type check the right hand side
+  (rhs_ty, fc_rhs) <- extendCtxM xs (monoTyToPolyTy <$> arg_tys) (elabTerm rhs)
+  -- The scrutinee type must match the pattern type
+  storeEqCs [ scr_ty :~: foldl TyApp (TyCon tc) (map TyVar bs)
+            -- All right hand sides should be the same
+            , res_ty :~: rhs_ty ]
 
-  fc_tys <- liftGenM $ mapM elabPolyTy arg_tys
+  fc_tys <- liftGenM $ mapM elabMonoTy arg_tys
   return (FcAlt (FcConPat fc_dc [] [] ((rnTmVarToFcTmVar <$> xs) |: fc_tys)) fc_rhs)
 
 -- | Covert a renamed type variable to a System F type
@@ -614,12 +583,18 @@ closureAll as theory cs =
 --   a) The data declaration for the class
 --   b) The method implementation
 --   c) The extended typing environment
-elabClsDecl :: RnClsDecl -> TcM (FcDataDecl, FcValBind, [FcValBind], ProgramTheory, TcCtx)
+elabClsDecl ::
+     RnClsDecl
+  -> TcM (FcFamDecl, FcDataDecl, FcValBind, [FcValBind], ProgramTheory, TcCtx)
 elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
   -- Generate a fresh type and data constructor for the class
   -- GEORGE: They should already be generated during renaming.
   tc <- lookupClsTyCon   cls
   dc <- lookupClsDataCon cls
+  let fc_a = rnTyVarToFcTyVar a
+
+  fc_tyfam <- lookupclsTyFam cls
+  let fc_fam_decl = FcFamDecl fc_tyfam [fc_a] KStar
 
   -- Elaborate the superclass constraints (with full well-formedness checking also)
   fc_sc_tys <- extendCtxM a (kindOf a) (mapM wfElabClsCt rn_cs)
@@ -628,7 +603,16 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
   (_kind, fc_method_ty) <- extendCtxM a (kindOf a) (wfElabPolyTy method_ty)
 
   -- Generate the datatype declaration
-  let fc_data_decl = FcDataDecl tc [rnTyVarToFcTyVar a] [(dc, mempty, mempty, fc_sc_tys ++ [fc_method_ty])]
+  let fc_ctx_ty = FcTyFam fc_tyfam [FcTyVar fc_a]
+  let fc_data_decl =
+        FcDataDecl
+          tc
+          [rnTyVarToFcTyVar a]
+          [ ( dc
+            , mempty
+            , mempty
+            , fc_ctx_ty : fc_sc_tys ++ [fc_method_ty])
+          ]
 
   -- Generate the method implementation
   (fc_val_bind, hs_method_ty) <- elabMethodSig method a cls method_ty
@@ -636,7 +620,7 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
   -- Construct the extended typing environment
   ty_ctx <- extendCtxM method hs_method_ty ask
 
-  (sc_schemes, sc_decls) <- fmap unzip $ forM (zip [0..] rn_cs) $ \(i,sc_ct) -> do
+  (sc_schemes, sc_decls) <- fmap unzip $ forM (zip [1..] rn_cs) $ \(i,sc_ct) -> do
     d  <- freshDictVar -- For the declaration
     da <- freshDictVar -- For the input dictionary
 
@@ -648,7 +632,8 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
     -- forall a. T_TC a -> upsilon_SC
     fc_scheme <- elabScheme scheme
 
-    xs <- replicateM (length rn_cs + 1) freshFcTmVar               -- n+1 fresh variables
+    -- fresh vars for inverse dict, super class dicts, method
+    xs <- replicateM (length rn_cs + 2) freshFcTmVar
 
     let fc_tm =
           FcTmTyAbs (rnTyVarToFcTyVar a) $
@@ -656,7 +641,7 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
           FcTmCase
             (FcTmVar da)
             [ FcAlt
-                (FcConPat dc [] [] (xs |: (fc_sc_tys ++ [fc_method_ty])))
+                (FcConPat dc [] [] (xs |: (fc_ctx_ty : fc_sc_tys ++ [fc_method_ty])))
                 (FcTmVar (xs !! i))
             ]
 
@@ -664,7 +649,7 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
 
     return (d :| scheme, proj)
 
-  return (fc_data_decl, fc_val_bind, sc_decls, sc_schemes, ty_ctx)
+  return (fc_fam_decl, fc_data_decl, fc_val_bind, sc_decls, sc_schemes, ty_ctx)
 
 -- | Elaborate a method signature to
 --   a) a top-level binding
@@ -690,7 +675,8 @@ elabMethodSig method a cls sigma = do
 
   dc <- lookupClsDataCon cls  -- pattern constructor
   super_cs <- lookupClsSuper cls
-  xs <- replicateM (length super_cs +1) freshFcTmVar -- n superclass variables + 1 for the method
+  -- n superclass variables + 2 for the method and inverse instances
+  xs <- replicateM (length super_cs + 2) freshFcTmVar
 
   -- Annotate the constraints with fresh dictionary variables
   (ds, ann_cs) <- annotateCts $ cs'
@@ -706,13 +692,16 @@ elabMethodSig method a cls sigma = do
   -- Elaborate the type of the dictionary contained method
   fc_dict_method_ty <- elabPolyTy $ substInPolyTy a_subst sigma
 
+  fc_tyfam <- lookupclsTyFam cls
+  let fc_bi_ty = FcTyFam fc_tyfam []
+
   let fc_method_rhs =
-        fcTmTyAbs (map rnTyVarToFcTyVar new_as) $
+        fcTmTyAbs (rnTyVarToFcTyVar <$> new_as) $
         fcTmAbs dbinds $
         FcTmCase
           (FcTmVar (head ds))
           [ FcAlt
-              (FcConPat dc mempty mempty (xs |: (fc_cs_tys ++ [fc_dict_method_ty])))
+              (FcConPat dc mempty mempty (xs |: (fc_bi_ty : fc_cs_tys ++ [fc_dict_method_ty])))
               (fcDictApp (fcTmTyApp (FcTmVar (last xs)) (fc_bs)) (tail ds))
           ]
 
@@ -753,7 +742,7 @@ extendCtxKindAnnotatedTysM ann_as = extendCtxM as (map kindOf as)
 -- | Elaborate a class instance. Take the program theory also as input and return
 --   a) The dictionary transformer implementation
 --   b) The extended program theory
-elabInsDecl :: FullTheory -> RnInsDecl -> TcM (FcValBind, FullTheory)
+elabInsDecl :: FullTheory -> RnInsDecl -> TcM (FcAxiomDecl, [FcValBind], FullTheory)
 elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
   let bs      = ftyvsOf typat
   let fc_bs   = map (rnTyVarToFcTyVar . labelOf) bs
@@ -766,16 +755,20 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
   ins_d <- freshDictVar
   ins_scheme <- fmap (ins_d :|) $ freshenLclBndrs $ CtrScheme bs ins_cs head_ct
 
-  --  Generate fresh dictionary variables for the instance context
   ann_ins_cs <- snd <$> annotateCts ins_cs
+  (fc_axiom_decl, inv_proj_binds, fc_ctx, inv_schemes)
+    <- elabBiderInst bs ann_ins_cs head_ct method
+
+  --  Generate fresh dictionary variables for the instance context
   (closure_cs, closure_ctx) <- closureAll
                                  (labelOf bs)
-                                 (theory_super theory)
+                                 (theory_super theory <> theory_bider theory)
                                  ann_ins_cs
   let ann_ins_schemes = (fmap . fmap) (CtrScheme [] []) (closure_cs <> ann_ins_cs)
 
   -- The extended program theory
-  let ext_theory = theory `ftExtendInst` [ins_scheme]
+  let ext_theory = theory `ftExtendInst`  [ins_scheme]
+                          `ftExtendBider` (inv_schemes)
 
   --  The local program theory
   let local_theory = ext_theory `ftExtendLocal` ann_ins_schemes
@@ -807,7 +800,7 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
                    colon <+>
                    ppr residual_cs $$ text "From" <+> colon <+> ppr local_theory)
 
-    return (map (substFcTmInTm ev_subst . FcTmVar) ds)
+    return $ substFcTmInTm ev_subst . FcTmVar <$> ds
 
   -- The full implementation of the dictionary transformer
   fc_dict_transformer <- do
@@ -817,12 +810,12 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
     return $ fcTmTyAbs fc_bs $
       fcTmAbs binds $
         applyDictCtx closure_ctx $
-          fcDataConApp dc pat_ty (fc_super_tms ++ [fc_method_tm])
+          fcDataConApp dc pat_ty ( fc_ctx : fc_super_tms ++ [fc_method_tm])
 
   -- Resulting dictionary transformer
   let fc_val_bind = FcValBind ins_d dtrans_ty fc_dict_transformer
 
-  return (fc_val_bind, ext_theory)
+  return (fc_axiom_decl, fc_val_bind : inv_proj_binds, ext_theory)
 
 -- | Instantiate a method type for a particular instance
 instMethodTy :: RnMonoTy -> RnPolyTy -> RnPolyTy
@@ -834,6 +827,69 @@ instMethodTy typat poly_ty = constructPolyTy (new_as, new_cs, new_ty)
     new_cs     = substInClsCs  subst cs
     new_ty     = substInMonoTy subst ty
 
+-- | TODO document
+elabBiderInst :: [RnTyVarWithKind] -> AnnClsCs -> RnClsCt -> RnTmVar
+             -> TcM (FcAxiomDecl, [FcValBind], FcTerm, ProgramTheory)
+elabBiderInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
+  let fc_bs = rnTyVarToFcTyVar . labelOf <$> bs
+  fc_head_ct <- elabClsCt head_ct
+  fc_param_ty <- elabMonoTy param_ty
+  inv_ds <- genFreshDictVars $ length ann_ins_cs
+  inv_d_tys <- mapM elabClsCt $ dropLabel ann_ins_cs
+  let ins_cs = dropLabel ann_ins_cs
+  method_ty <- instMethodTy param_ty <$> lookupCtxM method
+  fc_method_ty <- elabPolyTy method_ty
+  fc_method <- freshFcTmVar
+
+  g <- freshFcAxVar
+  f <- lookupclsTyFam cls
+  (fc_tuple_tc, fc_tuple_dc) <- lookupFcTuple $ length ann_ins_cs
+  let fc_axiom_decl =
+        FcAxiomDecl g fc_bs f [fc_param_ty] (fcTyApp (FcTyCon fc_tuple_tc) inv_d_tys)
+
+  a <- lookupClsParam cls
+  super_cs <- substVar a param_ty <$> lookupClsSuper cls
+  ann_super_cs <- snd <$> annotateCts super_cs
+  fc_super_binds <- fmap (uncurry (:|)) <$> annCtsToTmBinds ann_super_cs
+
+  dc <- lookupClsDataCon cls
+  (inv_schemes, inv_proj_binds) <- unzip <$> (forM (zipExact inv_ds ins_cs) $ \(di,ins_ct) -> do
+    let scheme' = CtrScheme bs [head_ct] ins_ct
+    scheme <- freshenLclBndrs scheme'
+    inv_proj_ty <- elabScheme scheme'
+    d <- freshDictVar
+    ctx <- freshFcTmVar
+    let inv_proj =
+          fcTmTyAbs fc_bs $
+          FcTmAbs d fc_head_ct $
+          FcTmCase (FcTmVar d) $
+          [ FcAlt
+              (FcConPat
+                 dc
+                 mempty
+                 mempty
+                 (ctx :| FcTyFam f [fc_param_ty] :
+                  fc_super_binds ++ [fc_method :| fc_method_ty]))
+              (FcTmCase
+                 (FcTmCast (FcTmVar ctx) (FcCoAx g (FcTyVar <$> fc_bs)))
+                 [ FcAlt
+                     (FcConPat fc_tuple_dc mempty mempty (inv_ds |: inv_d_tys))
+                     (FcTmVar di)
+                 ])
+          ]
+    di' <- freshDictVar
+    let inv_proj_bind = FcValBind di' inv_proj_ty inv_proj
+    return (di' :| scheme,inv_proj_bind))
+
+  let fc_ctx =
+        FcTmCast
+          (fcTmApp
+             (fcTmTyApp (FcTmDataCon fc_tuple_dc) inv_d_tys)
+             (FcTmVar <$> (labelOf ann_ins_cs)))
+          (FcCoSym (FcCoAx g (FcTyVar <$> fc_bs)))
+
+  return (fc_axiom_decl, inv_proj_binds, fc_ctx, inv_schemes)
+
 -- | Elaborate a term with an explicit type signature (method implementation).
 -- This involves both inference and type subsumption.
 elabTermWithSig :: [RnTyVar] -> FullTheory -> RnTerm -> RnPolyTy -> TcM FcTerm
@@ -844,14 +900,19 @@ elabTermWithSig untch theory tm poly_ty = do
   -- Infer the type of the expression and the wanted constraints
   ((mono_ty, fc_tm), wanted_eqs, wanted_ccs) <- runGenM $ elabTerm tm
 
+  let untouchables = nub (untch ++ map labelOf as)
+
   -- Generate fresh dictionary variables for the given constraints
   given_ccs <- snd <$> annotateCts cs
   dbinds <- annCtsToTmBinds given_ccs
-  (super_cs, closure_ctx) <- closureAll untch (theory_super theory) given_ccs
+  (super_cs, closure_ctx) <-
+    closureAll
+      untouchables
+      (theory_super theory <> theory_bider theory)
+      given_ccs
   let given_schemes = (fmap . fmap) (CtrScheme [] []) (super_cs <> given_ccs)
 
   -- Resolve all the wanted constraints
-  let untouchables = nub (untch ++ map labelOf as)
   ty_subst <- unify untouchables $ wanted_eqs ++ [mono_ty :~: ty]
   let local_theory = ftDropSuper theory <> given_schemes
   let wanted = substInAnnClsCs ty_subst wanted_ccs
@@ -931,6 +992,17 @@ elabValBind theory (ValBind a m_ty tm) = do
   let fc_val_bind = FcValBind (rnTmVarToFcTmVar a) fc_ty fc_tm
   return (fc_val_bind, extendCtx ctx a ty)
 
+-- * Primitive Elaboration
+-- ------------------------------------------------------------------------------
+
+-- | Elaborate various primitives (just tuples for now)
+elabPrimitives :: TcM [FcDataDecl]
+elabPrimitives = do
+  AssocList tuples <- tc_env_tuples <$> get
+  forM (snocListToList tuples) $ \(arity, (tc, dc)) -> do
+    as <- replicateM arity (freshFcTyVar KStar)
+    return $ FcDataDecl tc as [(dc, mempty, mempty, FcTyVar <$> as)]
+
 -- * Program Elaboration
 -- ------------------------------------------------------------------------------
 
@@ -942,20 +1014,31 @@ elabProgram :: FullTheory -> RnProgram
 -- Elaborate the program expression
 elabProgram theory (PgmExp tm) = do
   (ty, fc_tm) <- elabTermSimpl (ftDropSuper theory) tm
-  return (FcPgmTerm fc_tm, ty, theory) -- GEORGE: You should actually return the ones we have accumulated.
+  fc_prim_decls <- elabPrimitives
+  let fc_program = foldr FcPgmDataDecl (FcPgmTerm fc_tm) fc_prim_decls
+  return (fc_program, ty, theory)
 
 -- Elaborate a class declaration
 elabProgram theory (PgmCls cls_decl pgm) = do
-  (fc_data_decl, fc_val_bind, fc_sc_proj, ext_theory, ext_ty_env)  <- elabClsDecl cls_decl
-  (fc_pgm, ty, final_theory) <- setTcCtxTmM ext_ty_env (elabProgram (theory `ftExtendSuper` ext_theory) pgm)
-  let fc_program = FcPgmDataDecl fc_data_decl (FcPgmValDecl fc_val_bind (foldl (flip FcPgmValDecl) fc_pgm fc_sc_proj))
+  (fc_fam_decl, fc_data_decl, fc_val_bind, fc_sc_proj, ext_theory, ext_ty_env) <-
+    elabClsDecl cls_decl
+  (fc_pgm, ty, final_theory) <-
+    setTcCtxTmM ext_ty_env (elabProgram (theory `ftExtendSuper` ext_theory) pgm)
+  let fc_program =
+        FcPgmFamDecl fc_fam_decl $
+        FcPgmDataDecl
+          fc_data_decl
+          (FcPgmValDecl
+             fc_val_bind
+             (foldl (flip FcPgmValDecl) fc_pgm fc_sc_proj))
   return (fc_program, ty, final_theory)
 
 -- | Elaborate a class instance
 elabProgram theory (PgmInst ins_decl pgm) = do
-  (fc_val_bind, ext_theory) <- elabInsDecl theory ins_decl
+  (fc_axiom_decl, fc_val_binds, ext_theory) <- elabInsDecl theory ins_decl
   (fc_pgm, ty, final_theory) <- elabProgram ext_theory pgm
-  let fc_program = FcPgmValDecl fc_val_bind fc_pgm
+  let fc_program =
+        FcPgmAxiomDecl fc_axiom_decl $ foldr FcPgmValDecl fc_pgm fc_val_binds
   return (fc_program, ty, final_theory)
 
 -- Elaborate a datatype declaration
@@ -979,24 +1062,19 @@ hsElaborate ::
      RnEnv
   -> UniqueSupply
   -> RnProgram
-  -> Either CompileError ( ( ( (FcProgram, RnPolyTy, FullTheory)
-                             , ( AssocList FcTyCon FcTyConInfo
-                               , AssocList FcDataCon FcDataConInfo))
-                           , UniqueSupply)
+  -> Either CompileError ( (((FcProgram, RnPolyTy, FullTheory)), UniqueSupply)
                          , TcEnv)
 hsElaborate rn_gbl_env us pgm = runExcept
                               $ flip runStateT  tc_init_gbl_env -- Empty when you start
                               $ flip runReaderT tc_init_ctx
                               $ flip runUniqueSupplyT us
                               $ markTcError
-                              $ do { buildInitTcEnv pgm rn_gbl_env -- Create the actual global environment
-                                   ; result <- elabProgram tc_init_theory pgm
-                                   ; assocs <- buildInitFcAssocs
-                                   ; return (result, assocs) }
+                              $ do buildInitTcEnv pgm rn_gbl_env -- Create the actual global environment
+                                   elabProgram tc_init_theory pgm
   where
     tc_init_theory  = FT mempty mempty mempty mempty
     tc_init_ctx     = mempty
-    tc_init_gbl_env = TcEnv mempty mempty mempty
+    tc_init_gbl_env = TcEnv mempty mempty mempty mempty
 
 tcFail :: MonadError CompileError m => Doc -> m a
 tcFail = throwError . CompileError HsTypeChecker
