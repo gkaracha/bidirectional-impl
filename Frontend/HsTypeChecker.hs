@@ -757,18 +757,18 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
 
   ann_ins_cs <- snd <$> annotateCts ins_cs
   (fc_axiom_decl, inv_proj_binds, fc_ctx, inv_schemes)
-    <- elabBiderInst bs ann_ins_cs head_ct method
+    <- elabBidirInst bs ann_ins_cs head_ct method
 
   --  Generate fresh dictionary variables for the instance context
   (closure_cs, closure_ctx) <- closureAll
                                  (labelOf bs)
-                                 (theory_super theory <> theory_bider theory)
+                                 (theory_super theory <> theory_bidir theory)
                                  ann_ins_cs
   let ann_ins_schemes = (fmap . fmap) (CtrScheme [] []) (closure_cs <> ann_ins_cs)
 
   -- The extended program theory
   let ext_theory = theory `ftExtendInst`  [ins_scheme]
-                          `ftExtendBider` (inv_schemes)
+                          `ftExtendBidir` (inv_schemes)
 
   --  The local program theory
   let local_theory = ext_theory `ftExtendLocal` ann_ins_schemes
@@ -828,9 +828,9 @@ instMethodTy typat poly_ty = constructPolyTy (new_as, new_cs, new_ty)
     new_ty     = substInMonoTy subst ty
 
 -- | TODO document
-elabBiderInst :: [RnTyVarWithKind] -> AnnClsCs -> RnClsCt -> RnTmVar
-             -> TcM (FcAxiomDecl, [FcValBind], FcTerm, ProgramTheory)
-elabBiderInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
+elabBidirInst :: [RnTyVarWithKind] -> AnnClsCs -> RnClsCt -> RnTmVar
+              -> TcM (FcAxiomDecl, [FcValBind], FcTerm, ProgramTheory)
+elabBidirInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
   let fc_bs = rnTyVarToFcTyVar . labelOf <$> bs
   fc_head_ct <- elabClsCt head_ct
   fc_param_ty <- elabMonoTy param_ty
@@ -908,7 +908,7 @@ elabTermWithSig untch theory tm poly_ty = do
   (super_cs, closure_ctx) <-
     closureAll
       untouchables
-      (theory_super theory <> theory_bider theory)
+      (theory_super theory <> theory_bidir theory)
       given_ccs
   let given_schemes = (fmap . fmap) (CtrScheme [] []) (super_cs <> given_ccs)
 

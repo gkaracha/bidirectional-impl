@@ -371,7 +371,7 @@ data FullTheory = FT
   { theory_super :: ProgramTheory
   , theory_inst  :: ProgramTheory
   , theory_local :: ProgramTheory
-  , theory_bider :: ProgramTheory
+  , theory_bidir :: ProgramTheory
   }
 
 -- | Extend the superclass component of the theory
@@ -387,8 +387,8 @@ ftExtendLocal :: FullTheory -> ProgramTheory -> FullTheory
 ftExtendLocal theory local_cs = theory { theory_local = theory_local theory `mappend` local_cs }
 
 -- | Extend the inverted instance component of the theory
-ftExtendBider :: FullTheory -> ProgramTheory -> FullTheory
-ftExtendBider theory local_cs = theory { theory_bider = theory_bider theory `mappend` local_cs }
+ftExtendBidir :: FullTheory -> ProgramTheory -> FullTheory
+ftExtendBidir theory local_cs = theory { theory_bidir = theory_bidir theory `mappend` local_cs }
 
 -- | Collapse the full program theory to a program theory (just concatenate)
 ftToProgramTheory :: FullTheory -> ProgramTheory
@@ -493,12 +493,12 @@ instance PrettyPrint ClassInfo where
   needsParens _ = False
 
 instance PrettyPrint FullTheory where
-  ppr (FT super inst local bider)
+  ppr (FT super inst local bidir)
     = braces $ vcat $ punctuate comma
     $ [ text "theory_super" <+> colon <+> ppr super
       , text "theory_inst"  <+> colon <+> ppr inst
       , text "theory_local" <+> colon <+> ppr local
-      , text "theory_bider" <+> colon <+> ppr bider
+      , text "theory_bidir" <+> colon <+> ppr bidir
       ]
   needsParens _ = False
 
