@@ -143,8 +143,9 @@ lookupClsTyCon cls = cls_tycon <$> lookupTcEnvM tc_env_cls_info cls
 lookupClsDataCon :: RnClass -> TcM FcDataCon
 lookupClsDataCon cls = cls_datacon <$> lookupTcEnvM tc_env_cls_info cls
 
-lookupclsTyFam :: RnClass -> TcM FcTyFam
-lookupclsTyFam cls = cls_tyfam <$> lookupTcEnvM tc_env_cls_info cls
+-- | Lookup the System Fc type family for a class
+lookupClsTyFam :: RnClass -> TcM FcTyFam
+lookupClsTyFam cls = cls_tyfam <$> lookupTcEnvM tc_env_cls_info cls
 
 -- | Get the signature of a data constructor in pieces
 dataConSig :: RnDataCon -> TcM ([RnTyVar], [RnMonoTy], RnTyCon)
@@ -165,6 +166,8 @@ lookupClsParam cls = do
     [a] -> return a
     _   -> tcFail (text "lookupClsParam")
 
+-- | Get the type constructor and data constructor for a tuple with the given
+-- arity. Tuples that aren't in the environment will be lazely created.
 lookupFcTuple :: Int -> TcM (FcTyCon, FcDataCon)
 lookupFcTuple arity = lookupTcEnvM tc_env_tuples arity `catchError` \_ -> do
   fc_tc  <- FcTC . mkName (mkSym "Tuple#") <$> getUniqueM
@@ -593,7 +596,7 @@ elabClsDecl (ClsD rn_cs cls (a :| _) method method_ty) = do
   dc <- lookupClsDataCon cls
   let fc_a = rnTyVarToFcTyVar a
 
-  fc_tyfam <- lookupclsTyFam cls
+  fc_tyfam <- lookupClsTyFam cls
   let fc_fam_decl = FcFamDecl fc_tyfam [fc_a] KStar
 
   -- Elaborate the superclass constraints (with full well-formedness checking also)
@@ -692,7 +695,7 @@ elabMethodSig method a cls sigma = do
   -- Elaborate the type of the dictionary contained method
   fc_dict_method_ty <- elabPolyTy $ substInPolyTy a_subst sigma
 
-  fc_tyfam <- lookupclsTyFam cls
+  fc_tyfam <- lookupClsTyFam cls
   let fc_bi_ty = FcTyFam fc_tyfam []
 
   let fc_method_rhs =
@@ -842,7 +845,7 @@ elabBidirInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
   fc_method <- freshFcTmVar
 
   g <- freshFcAxVar
-  f <- lookupclsTyFam cls
+  f <- lookupClsTyFam cls
   (fc_tuple_tc, fc_tuple_dc) <- lookupFcTuple $ length ann_ins_cs
   let fc_axiom_decl =
         FcAxiomDecl g fc_bs f [fc_param_ty] (fcTyApp (FcTyCon fc_tuple_tc) inv_d_tys)
@@ -896,11 +899,11 @@ elabTermWithSig :: [RnTyVar] -> FullTheory -> RnTerm -> RnPolyTy -> TcM FcTerm
 elabTermWithSig untch theory tm poly_ty = do
   let (as, cs, ty) = destructPolyTy poly_ty
   let fc_as = map rnTyVarToFcTyVar (labelOf as)
+  let untouchables = nub (untch ++ map labelOf as)
 
   -- Infer the type of the expression and the wanted constraints
   ((mono_ty, fc_tm), wanted_eqs, wanted_ccs) <- runGenM $ elabTerm tm
 
-  let untouchables = nub (untch ++ map labelOf as)
 
   -- Generate fresh dictionary variables for the given constraints
   given_ccs <- snd <$> annotateCts cs
@@ -1068,7 +1071,7 @@ hsElaborate rn_gbl_env us pgm = runExcept
                               $ flip runStateT  tc_init_gbl_env -- Empty when you start
                               $ flip runReaderT tc_init_ctx
                               $ flip runUniqueSupplyT us
-                              $ markTcError
+                              $ markErrorPhase HsTypeChecker
                               $ do buildInitTcEnv pgm rn_gbl_env -- Create the actual global environment
                                    elabProgram tc_init_theory pgm
   where
@@ -1078,6 +1081,3 @@ hsElaborate rn_gbl_env us pgm = runExcept
 
 tcFail :: MonadError CompileError m => Doc -> m a
 tcFail = throwError . CompileError HsTypeChecker
-
-markTcError :: MonadError CompileError m => m a -> m a
-markTcError = markErrorPhase HsTypeChecker

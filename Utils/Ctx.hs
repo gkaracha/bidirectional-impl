@@ -28,12 +28,15 @@ import           Utils.Var
 import           Control.Monad.Except
 import           Control.Monad.Reader
 
--- TODO document everything
+-- * Context operations
+-- ------------------------------------------------------------------------------
 
+-- | Context type class
 class (Eq src) => Context ctx src trg | src ctx -> trg where
   lookupCtx :: ctx -> src -> Maybe trg
   extendCtx :: ctx -> src -> trg -> ctx
 
+-- | Do a lookup in the context, throw an error if not bound
 lookupCtxM ::
      ( MonadError CompileError m
      , PrettyPrint src
@@ -46,12 +49,15 @@ lookupCtxM src = ask >>= \ctx -> case lookupCtx ctx src of
   Just trg -> return trg
   Nothing -> throwErrorM $ text "Unbound variable" <+> colon <+> ppr src
 
+-- | Extend the context
 extendCtxM :: (Context ctx src trg, MonadReader ctx m) => src -> trg -> m a -> m a
 extendCtxM s t = local (\ctx -> extendCtx ctx s t)
 
+-- | Replace the current context
 setCtxM :: MonadReader ctx m => ctx -> m a -> m a
 setCtxM ctx = local $ const ctx
 
+-- | Check if something is not already bound in the context, throw an error otherwise
 notInCtxM ::
      ( PrettyPrint src
      , MonadReader ctx m
@@ -64,18 +70,20 @@ notInCtxM x = ask >>= \ctx -> case lookupCtx ctx x of
   Just _ -> throwErrorM (text "notInCtxM" <+> colon <+> ppr x <+> text "is already bound")
   Nothing -> return ()
 
--- TODO move FcTc stuff to Fc typechecker?
-type FcTcCtx     = SnocList FcTcBinding
-data FcTcBinding = FcTcTmBnd FcTmVar FcType
-                 | FcTcTyBnd FcTyVar Kind
-                 | FcTcCoBnd FcCoVar FcProp
-
+-- | Context instance for lists
 instance Context ctx src trg => Context ctx [src] [trg] where
   lookupCtx ctx               = traverse (lookupCtx ctx)
   extendCtx ctx (s:ss) (t:ts) = extendCtx (extendCtx ctx ss ts) s t
   extendCtx ctx []     []     = ctx
   extendCtx _   _      _      = error "extendCtx: length mismatch"
   -- TODO length mismatch, implement als fooM instead for better error?
+
+-- * System Fc typechecker context
+-- ------------------------------------------------------------------------------
+type FcTcCtx     = SnocList FcTcBinding
+data FcTcBinding = FcTcTmBnd FcTmVar FcType
+                 | FcTcTyBnd FcTyVar Kind
+                 | FcTcCoBnd FcCoVar FcProp
 
 instance Context (SnocList FcTcBinding) FcTmVar FcType where
   lookupCtx (ctx :> FcTcTmBnd a ty) b = if a == b then Just ty else lookupCtx ctx b
@@ -95,6 +103,8 @@ instance Context (SnocList FcTcBinding) FcCoVar FcProp where
   lookupCtx SN _ = Nothing
   extendCtx ctx src trg = ctx :> FcTcCoBnd src trg
 
+-- * Renamer context
+-- ------------------------------------------------------------------------------
 type RnCtx = SnocList RnBinding
 data RnBinding = RnTmVarBnd PsTmVar RnTmVar
                | RnTyVarBnd PsTyVar RnTyVar
@@ -111,6 +121,8 @@ instance Context RnCtx PsTyVar RnTyVar where
   lookupCtx SN _ = Nothing
   extendCtx ctx src trg = ctx :> RnTyVarBnd src trg
 
+-- * Haskell typechecker context
+-- ------------------------------------------------------------------------------
 type TcCtx = SnocList TcBinding
 data TcBinding = TcTmVarBnd RnTmVar RnPolyTy
                | TcTyVarBnd RnTyVar Kind
