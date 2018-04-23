@@ -77,7 +77,7 @@ instance SubstVar FcTyVar FcType FcType where
       | otherwise   -> FcTyAbs b (substVar a ty ty1)
     FcTyApp ty1 ty2 -> FcTyApp (substVar a ty ty1) (substVar a ty ty2)
     FcTyCon tc      -> FcTyCon tc
-    FcTyQual phi aty -> FcTyQual (substVar a aty phi) (substVar a aty ty)
+    FcTyQual phi aty -> FcTyQual (substVar a ty phi) (substVar a ty aty)
     FcTyFam f tys   -> FcTyFam f $ map (substVar a ty) tys
 
 -- | Substitute a type variable for a type in a term
