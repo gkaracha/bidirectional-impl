@@ -147,6 +147,10 @@ lookupClsDataCon cls = cls_datacon <$> lookupTcEnvM tc_env_cls_info cls
 lookupClsTyFam :: RnClass -> TcM FcTyFam
 lookupClsTyFam cls = cls_tyfam <$> lookupTcEnvM tc_env_cls_info cls
 
+-- | Lookup the type class method name
+lookupClsMethod :: RnClass -> TcM RnTmVar
+lookupClsMethod cls = cls_method <$> lookupTcEnvM tc_env_cls_info cls
+
 -- | Get the signature of a data constructor in pieces
 dataConSig :: RnDataCon -> TcM ([RnTyVar], [RnMonoTy], RnTyCon)
 dataConSig dc = lookupTcEnvM tc_env_dc_info dc >>= \info ->
@@ -759,8 +763,10 @@ elabInsDecl theory (InsD ins_cs cls typat method method_tm) = do
   ins_scheme <- fmap (ins_d :|) $ freshenLclBndrs $ CtrScheme bs ins_cs head_ct
 
   ann_ins_cs <- snd <$> annotateCts ins_cs
+
+  -- Elaborate the inverted type class instances
   (fc_axiom_decl, inv_proj_binds, fc_ctx, inv_schemes)
-    <- elabBidirInst bs ann_ins_cs head_ct method
+    <- elabBidirInst bs ann_ins_cs head_ct
 
   --  Generate fresh dictionary variables for the instance context
   (closure_cs, closure_ctx) <- closureAll
@@ -830,19 +836,18 @@ instMethodTy typat poly_ty = constructPolyTy (new_as, new_cs, new_ty)
     new_cs     = substInClsCs  subst cs
     new_ty     = substInMonoTy subst ty
 
--- | TODO document
-elabBidirInst :: [RnTyVarWithKind] -> AnnClsCs -> RnClsCt -> RnTmVar
+-- | Elaborates the inverted type class instances.
+-- Returns the inverted context Fc axiom, the inverted dictionary projections,
+-- the dictionary context and the inverted constraint schemes.
+elabBidirInst :: [RnTyVarWithKind] -> AnnClsCs -> RnClsCt
               -> TcM (FcAxiomDecl, [FcValBind], FcTerm, ProgramTheory)
-elabBidirInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
+elabBidirInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) = do
   let fc_bs = rnTyVarToFcTyVar . labelOf <$> bs
   fc_head_ct <- elabClsCt head_ct
   fc_param_ty <- elabMonoTy param_ty
   inv_ds <- genFreshDictVars $ length ann_ins_cs
   inv_d_tys <- mapM elabClsCt $ dropLabel ann_ins_cs
   let ins_cs = dropLabel ann_ins_cs
-  method_ty <- instMethodTy param_ty <$> lookupCtxM method
-  fc_method_ty <- elabPolyTy method_ty
-  fc_method <- freshFcTmVar
 
   g <- freshFcAxVar
   f <- lookupClsTyFam cls
@@ -856,6 +861,9 @@ elabBidirInst bs ann_ins_cs head_ct@(ClsCt cls param_ty) method = do
   fc_super_binds <- fmap (uncurry (:|)) <$> annCtsToTmBinds ann_super_cs
 
   dc <- lookupClsDataCon cls
+  fc_method_ty <- elabPolyTy =<< instMethodTy param_ty <$>
+                    (lookupCtxM =<< lookupClsMethod cls)
+  fc_method <- freshFcTmVar
   (inv_schemes, inv_proj_binds) <- unzip <$> (forM (zipExact inv_ds ins_cs) $ \(di,ins_ct) -> do
     let scheme' = CtrScheme bs [head_ct] ins_ct
     scheme <- freshenLclBndrs scheme'
